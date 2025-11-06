@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+   <meta charset="UTF-8">
+   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+   <title>เครื่องมือสร้างภาพใบหน้าด้วย AI</title>
+   <script src="https://cdn.tailwindcss.com"></script>
+   <style>
+       @import url('https://fonts.googleapis.com/css2?family=Inter:wght@100..900&family=Noto+Sans+Thai:wght@100..900&display=swap');
+       body {
+           font-family: 'Noto Sans Thai', 'Inter', sans-serif;
+           background-color: #f7f7f7;
+           display: flex;
+           justify-content: center;
+           padding: 20px;
+       }
+       .container {
+           max-width: 1000px;
+           width: 100%;
+       }
+       .input-card, .output-card {
+           background-color: white;
+           padding: 20px;
+           border-radius: 12px;
+           box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -2px rgba(0, 0, 0, 0.1);
+           margin-bottom: 20px;
+       }
+       textarea {
+           resize: vertical;
+           min-height: 80px;
+       }
+       .btn-generate {
+           padding: 12px 24px;
+           font-weight: 600;
+           border-radius: 8px;
+           transition: all 0.3s;
+           box-shadow: 0 4px 15px -5px rgba(59, 130, 246, 0.7);
+       }
+       .btn-generate:hover {
+           opacity: 0.9;
+           transform: translateY(-1px);
+       }
+       .loading-ring {
+           border: 4px solid #f3f3f3;
+           border-top: 4px solid #3498db;
+           border-radius: 50%;
+           width: 30px;
+           height: 30px;
+           animation: spin 1s linear infinite;
+           display: inline-block;
+           margin-right: 10px;
+       }
+       @keyframes spin {
+           0% { transform: rotate(0deg); }
+           100% { transform: rotate(360deg); }
+       }
+   </style>
+   <script>
+       // กำหนด Global Variables สำหรับ Firebase/API
+       const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+       // API Key จะถูกดึงมาจากช่อง input 'api-key-input' แทน
+       
+       // ฟังก์ชันแปลง File เป็น Base64
+       function fileToBase64(file) {
+           return new Promise((resolve, reject) => {
+               const reader = new FileReader();
+               reader.readAsDataURL(file);
+               reader.onload = () => {
+                   // ลบ prefix "data:image/jpeg;base64," ออก เพื่อให้เหลือแต่ Base64 data
+                   const base64String = reader.result.split(',')[1];
+                   resolve(base64String);
+               };
+               reader.onerror = error => reject(error);
+           });
+       }
+
+       // ฟังก์ชันหน่วงเวลาสำหรับ Exponential Backoff
+       function delay(ms) {
+           return new Promise(resolve => setTimeout(resolve, ms));
+       }
+
+       // ------------------ ฟังก์ชัน Download ------------------
+       
+       function downloadImage(imageUrl) {
+           // สร้าง Element <a> ชั่วคราวเพื่อ Trigger การดาวน์โหลด
+           const link = document.createElement('a');
+           link.href = imageUrl;
+           // กำหนดชื่อไฟล์สำหรับบันทึก
+           link.download = `AI_Portrait_${new Date().toISOString().replace(/:/g, '-')}.png`;
+           document.body.appendChild(link);
+           link.click();
+           document.body.removeChild(link);
+       }
+
+       // ------------------ ฟังก์ชันหลักในการสร้างภาพ ------------------
+       async function generateImage() {
+           const faceInput = document.getElementById('face-input');
+           const outputDiv = document.getElementById('output');
+           const generateButton = document.getElementById('generate-btn');
+           const statusMessage = document.getElementById('status-message');
+           
+           // ดึง API Key จากช่อง Input
+           const userApiKey = document.getElementById('api-key-input').value.trim();
+
+           outputDiv.innerHTML = '';
+           statusMessage.textContent = '';
+           
+           if (!userApiKey) {
+               statusMessage.textContent = 'กรุณาป้อน Gemini API Key ในช่องด้านบนสุดก่อน (Please enter your API Key).';
+               return;
+           }
+
+           if (faceInput.files.length === 0) {
+               statusMessage.textContent = 'กรุณาอัปโหลดรูปภาพใบหน้าก่อน (Please upload a face image).';
+               return;
+           }
+
+           const files = faceInput.files[0];
+           const mimeType = files.type;
+           if (!mimeType.startsWith('image/')) {
+               statusMessage.textContent = 'ไฟล์ที่อัปโหลดไม่ใช่รูปภาพ (Uploaded file is not an image).';
+               return;
+           }
+
+           // แสดงสถานะกำลังโหลด
+           generateButton.disabled = true;
+           generateButton.innerHTML = `<span class="loading-ring"></span>กำลังสร้างภาพ...`;
+           statusMessage.textContent = 'กำลังประมวลผลและสร้างภาพ... โปรดรอสักครู่';
+
+           try {
+               const base64Data = await fileToBase64(files);
+
+               // ดึงข้อมูลจากช่องกรอกต่างๆ
+               const details = document.getElementById('person-details').value.trim();
+               const clothing = document.getElementById('clothing-style').value.trim();
+               const scene = document.getElementById('scene').value.trim();
+               const vibe = document.getElementById('vibe-lighting').value.trim();
+
+               // รวมและแปล Prompt เป็นภาษาอังกฤษ
+               const thaiPrompt = `รายละเอียด: ${details}. เสื้อผ้า: ${clothing}. ฉาก: ${scene}. ฟิลลิ่ง/แสง: ${vibe}.`;
+               
+               const englishPrompt = `A stunning, high-definition, photorealistic portrait created using the uploaded image as a facial reference. The new image should strictly follow these descriptive elements, applying them to the face in the reference photo: ${thaiPrompt}. The style should be cinematic, emphasizing realistic skin texture, sharp details, and volumetric lighting.`;
+
+
+               // ใช้ API Key ที่ผู้ใช้ป้อนมาใน URL
+               const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-image-preview:generateContent?key=${userApiKey}`;
+               
+               const payload = {
+                   contents: [
+                       {
+                           parts: [
+                               { text: englishPrompt },
+                               {
+                                   inlineData: {
+                                       mimeType: mimeType,
+                                       data: base64Data
+                                   }
+                               }
+                           ]
+                       }
+                   ],
+                   generationConfig: {
+                       responseModalities: ['TEXT', 'IMAGE']
+                   },
+               };
+
+               let response = null;
+               let result = null;
+               let success = false;
+               const maxRetries = 3;
+
+               for (let i = 0; i < maxRetries; i++) {
+                   try {
+                       response = await fetch(apiUrl, {
+                           method: 'POST',
+                           headers: { 'Content-Type': 'application/json' },
+                           body: JSON.stringify(payload)
+                       });
+
+                       if (response.ok) {
+                           result = await response.json();
+                           success = true;
+                           break;
+                       } else if (response.status === 429 && i < maxRetries - 1) {
+                           const waitTime = Math.pow(2, i) * 1000;
+                           await delay(waitTime);
+                       } else {
+                           const errorText = await response.text();
+                           throw new Error(`API call failed with status ${response.status}: ${errorText}`);
+                       }
+                   } catch (error) {
+                       if (i === maxRetries - 1) {
+                           throw error;
+                       }
+                       const waitTime = Math.pow(2, i) * 1000;
+                       await delay(waitTime);
+                   }
+               }
+
+               if (!success) {
+                   throw new Error('ไม่สามารถเชื่อมต่อหรือรับการตอบกลับจาก AI ได้ (Failed to connect or receive response from AI).');
+               }
+
+               const base64Image = result?.candidates?.[0]?.content?.parts?.find(p => p.inlineData)?.inlineData?.data;
+
+               if (base64Image) {
+                   const imageUrl = `data:image/png;base64,${base64Image}`;
+                   
+                   // อัปเดต Output HTML ให้แสดงแค่ภาพและปุ่มดาวน์โหลดเท่านั้น
+                   outputDiv.innerHTML = `
+                       <div class="relative w-full h-auto">
+                           <!-- ภาพผลลัพธ์ -->
+                           <img src="${imageUrl}" alt="ภาพที่สร้างโดย AI"
+                               class="w-full h-auto object-contain rounded-lg shadow-lg"/>
+                           
+                           <div class="mt-4 flex justify-center">
+                               <button onclick="downloadImage('${imageUrl}')"
+                                   class="px-4 py-3 bg-green-600 text-white font-semibold rounded-xl hover:bg-green-700 transition duration-150 shadow-md">
+                                   <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2.5" stroke="currentColor" class="w-5 h-5 inline-block mr-2">
+                                       <path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M16.5 12L12 16.5m0 0L7.5 12m4.5 4.5V3" />
+                                   </svg>
+                                   ดาวน์โหลด (บันทึก)
+                               </button>
+                           </div>
+                       </div>
+                   `;
+                   statusMessage.textContent = 'สร้างภาพสำเร็จ! (Image generated successfully!)';
+               } else {
+                   const modelText = result?.candidates?.[0]?.content?.parts?.[0]?.text || 'ไม่พบข้อความตอบกลับจากโมเดล';
+                   statusMessage.textContent = `สร้างภาพไม่สำเร็จ: AI ไม่ได้ส่งไฟล์รูปภาพกลับมา (Image generation failed: AI did not return an image file). ข้อความจาก AI: ${modelText}`;
+                   console.error("AI response did not contain image data:", result);
+               }
+
+           } catch (error) {
+               console.error("Error during image generation:", error);
+               statusMessage.textContent = `เกิดข้อผิดพลาดในการสร้างภาพ: โปรดตรวจสอบ API Key และข้อจำกัดการใช้งาน ${error.message}`;
+           } finally {
+               generateButton.disabled = false;
+               generateButton.innerHTML = `สร้างภาพ (Generate Image)`;
+           }
+       }
+   </script>
+</head>
+<body>
+   <div class="container">
+       <h1 class="text-3xl font-extrabold text-center mb-6 text-gray-800">
+           เครื่องมือสร้างภาพใบหน้าด้วย AI
+       </h1>
+
+       <!-- ส่วนแก้ไขปัญหา: API Key Input -->
+       <div class="input-card bg-red-50 border-2 border-red-300">
+           <label for="api-key-input" class="block text-xl font-bold mb-2 text-red-700">
+               ⭐ API Key (จำเป็นสำหรับการใช้งานนอก Canvas)
+           </label>
+           <p class="text-sm text-red-600 mb-3">
+               หากคุณเปิดไฟล์นี้บนคอมพิวเตอร์ โปรดป้อน Gemini API Key ของคุณที่นี่ (เช่น AKsYza...xYfD) มิฉะนั้นการสร้างภาพจะล้มเหลว
+           </p>
+           <input type="password" id="api-key-input" class="w-full p-3 border border-red-400 rounded-lg focus:ring-red-500 focus:border-red-500 font-mono" placeholder="ป้อน Gemini API Key ของคุณที่นี่">
+       </div>
+       
+       <div class="grid grid-cols-1 lg:grid-cols-3 gap-5">
+           <!-- ส่วนที่ 1: อัปโหลดรูปใบหน้า -->
+           <div class="input-card lg:col-span-1">
+               <label for="face-input" class="block text-xl font-bold mb-3 text-blue-700">1. อัปโหลดรูปภาพใบหน้า (Face Reference)</label>
+               <p class="text-sm text-gray-600 mb-4">รูปภาพนี้จะใช้เป็นต้นแบบใบหน้าสำหรับสร้างภาพใหม่</p>
+               <input type="file" id="face-input" accept="image/*" class="w-full text-sm text-gray-700
+                   file:mr-4 file:py-2 file:px-4
+                   file:rounded-full file:border-0
+                   file:text-sm file:font-semibold
+                   file:bg-blue-50 file:text-blue-700
+                   hover:file:bg-blue-100 cursor-pointer
+               "/>
+           </div>
+
+           <!-- ส่วนที่ 2: รายละเอียดบุคคล -->
+           <div class="input-card lg:col-span-2">
+               <label for="person-details" class="block text-xl font-bold mb-2 text-gray-700">2. รายละเอียดบุคคล (Details)</label>
+               <p class="text-sm text-gray-600 mb-3">ระบุ เพศ, สีผิว, ลักษณะเด่น, อายุ, ท่าทาง (เช่น ชาย, ผิวแทน, หนวดเคราบางๆ, อายุ 30, กำลังยิ้ม)</p>
+               <textarea id="person-details" class="w-full p-3 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500" placeholder="ตัวอย่าง: หญิง, ผิวขาว, ผมยาวสีดำ, อายุ 25, ท่าทางกำลังจิบกาแฟ"></textarea>
+           </div>
+       </div>
+       
+       <div class="grid grid-cols-1 md:grid-cols-3 gap-5">
+           <!-- ส่วนที่ 3: รูปแบบเสื้อผ้า -->
+           <div class="input-card">
+               <label for="clothing-style" class="block text-xl font-bold mb-2 text-gray-700">3. รูปแบบเสื้อผ้า (Clothing Style)</label>
+               <p class="text-sm text-gray-600 mb-3">ระบุสไตล์เสื้อผ้าที่ต้องการ</p>
+               <textarea id="clothing-style" class="w-full p-3 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500" placeholder="ตัวอย่าง: ชุดราตรีสีแดง, เสื้อยืดเรียบๆ กับกางเกงยีนส์"></textarea>
+           </div>
+
+           <!-- ส่วนที่ 4: ฉาก/พื้นหลัง -->
+           <div class="input-card">
+               <label for="scene" class="block text-xl font-bold mb-2 text-gray-700">4. ฉาก/พื้นหลัง (Scene/Background)</label>
+               <p class="text-sm text-gray-600 mb-3">ระบุสถานที่หรือฉากหลังของภาพ</p>
+               <textarea id="scene" class="w-full p-3 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500" placeholder="ตัวอย่าง: ในป่าสนตอนเช้า, สตูดิโอถ่ายภาพสีขาว"></textarea>
+           </div>
+
+           <!-- ส่วนที่ 5: ฟิลลิ่ง/แสงและสี -->
+           <div class="input-card">
+               <label for="vibe-lighting" class="block text-xl font-bold mb-2 text-gray-700">5. ฟิลลิ่ง/แสงและสี (Vibe/Lighting/Color)</label>
+               <p class="text-sm text-gray-600 mb-3">ระบุอารมณ์, การจัดแสง, และโทนสี</p>
+               <textarea id="vibe-lighting" class="w-full p-3 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500" placeholder="ตัวอย่าง: แสงสีทองยามเย็น (Golden Hour), โทนภาพยนตร์, อารมณ์เศร้า"></textarea>
+           </div>
+       </div>
+
+       <!-- ปุ่มและสถานะ -->
+       <div class="text-center my-6">
+           <button id="generate-btn" onclick="generateImage()"
+                   class="btn-generate bg-blue-600 text-white hover:bg-blue-700 w-full md:w-auto">
+               สร้างภาพ (Generate Image)
+           </button>
+       </div>
+       <p id="status-message" class="text-center text-red-500 font-medium mb-4"></p>
+
+       <!-- ส่วนแสดงผล -->
+       <div class="output-card">
+           <h2 class="text-2xl font-bold mb-4 text-gray-800 text-center">ผลลัพธ์ของภาพ</h2>
+           <div id="output" class="min-h-[300px] flex items-center justify-center bg-gray-100 rounded-lg border-2 border-dashed border-gray-300 p-4">
+               <p class="text-gray-500">ภาพที่สร้างโดย AI จะปรากฏที่นี่</p>
+           </div>
+       </div>
+
+   </div>
+</body>
+</html>
